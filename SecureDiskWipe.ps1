@@ -98,7 +98,9 @@ function New-PatternBuffer {
     switch ($Pattern) {
         'Zero' { return $buffer }
         'One' {
-            [Array]::Fill[byte]($buffer, 0xFF)
+            for ($index = 0; $index -lt $buffer.Length; $index++) {
+                $buffer[$index] = 0xFF
+            }
             return $buffer
         }
         'Random' {
