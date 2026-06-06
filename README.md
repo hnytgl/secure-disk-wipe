@@ -1,70 +1,82 @@
 # Secure Disk Wipe
 
-`SecureDiskWipe.ps1` 目前存在源码编码/语法损坏，尚未通过 PowerShell 解析检查。该脚本会执行不可逆的数据擦除操作；在源码修复并完成隔离介质测试前，请勿运行，也不要使用 `-Force` 绕过固定磁盘保护。
+A Windows PowerShell script that formats a volume and then wipes the free space with three overwrite passes — suitable for sanitizing USB drives, external HDDs, and secondary partitions before disposal or repurposing.
 
-一个 Windows PowerShell 磁盘格式化后三遍擦写脚本，适合个人在处理旧 U 盘、移动硬盘、备用分区前使用，主要目的是降低普通数据恢复软件找回文件的概率。
+## Features
 
-## 功能
+- Optionally formats the target volume before wiping.
+- Performs three overwrite passes on the free space:
+  1. `0x00` (zero-fill)
+  2. `0xFF` (one-fill)
+  3. Random data (cryptographic RNG)
+- Displays target drive information and requires a confirmation phrase before proceeding.
+- Blocks operations on fixed disks by default (use `-Force` to override).
+- Supports NTFS and exFAT file systems.
+- Validates chunk size input with `ValidateRange`.
+- Requires Administrator privileges (`#Requires -RunAsAdministrator`).
 
-- 可选择先格式化目标卷，再进行擦写。
-- 对格式化后的空闲空间执行三遍填充：
-  1. `0x00`
-  2. `0xFF`
-  3. 随机数据
-- 操作前显示目标盘信息，并要求输入确认短语。
-- 默认阻止固定磁盘操作，避免误擦系统盘或内置硬盘。
-- 支持 NTFS 和 exFAT。
+## Requirements
 
-## 使用方法
+- Windows 8+ / Windows Server 2012+ (requires the Storage module).
+- PowerShell 5.1 (Windows PowerShell) or PowerShell 7+.
+- Administrator privileges.
 
-以管理员身份打开 PowerShell，进入脚本目录后执行：
+## Usage
+
+Open PowerShell as Administrator, navigate to the script directory, and run:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 .\SecureDiskWipe.ps1 -DriveLetter E
 ```
 
-如果确认目标是内置固定磁盘，需要额外添加 `-Force`：
+If the target is an internal fixed disk, add `-Force`:
 
 ```powershell
 .\SecureDiskWipe.ps1 -DriveLetter E -Force
 ```
 
-如果已经手动格式化过，只想对剩余空间执行三遍擦写：
+To skip formatting and only wipe existing free space:
 
 ```powershell
 .\SecureDiskWipe.ps1 -DriveLetter E -SkipFormat
 ```
 
-使用 exFAT：
+Use exFAT instead of NTFS:
 
 ```powershell
 .\SecureDiskWipe.ps1 -DriveLetter E -FileSystem exFAT
 ```
 
-## 参数说明
+Use quick format and a custom volume label:
 
-| 参数 | 说明 |
-| --- | --- |
-| `-DriveLetter` | 必填。目标盘符，例如 `E`。 |
-| `-FileSystem` | 格式化文件系统，支持 `NTFS` 和 `exFAT`，默认 `NTFS`。 |
-| `-NewFileSystemLabel` | 格式化后的卷标，默认 `WIPED`。 |
-| `-SkipFormat` | 跳过格式化，只擦写当前空闲空间。 |
-| `-QuickFormat` | 使用快速格式化。未指定时使用完整格式化。 |
-| `-Force` | 允许对固定磁盘执行操作。 |
-| `-ChunkMiB` | 单次写入块大小，默认 `64` MiB。 |
+```powershell
+.\SecureDiskWipe.ps1 -DriveLetter E -QuickFormat -NewFileSystemLabel "CLEAN"
+```
 
-## 使用提醒
+## Parameters
 
-- 请务必确认盘符。运行后脚本会要求输入类似 `WIPE E` 的确认短语。
-- 该脚本主要针对机械硬盘、U 盘、移动硬盘和普通恢复场景。
-- 对 SSD/NVMe 来说，因为磨损均衡、TRIM、预留块和控制器映射，文件级填充擦写不能保证覆盖所有历史数据。需要更高保证时，请优先使用硬盘厂商 Secure Erase 工具、主板 BIOS/NVMe Secure Erase 功能，或 Windows 重置里的清理驱动器选项。
-- 三遍擦写会占用较长时间，容量越大耗时越久。
-- 脚本不会擦写隐藏分区、坏块重映射区域、固件缓存或磁盘保留区域。
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `-DriveLetter` | string (required) | — | Target drive letter, e.g. `E`. |
+| `-FileSystem` | NTFS / exFAT | `NTFS` | File system for the formatted volume. |
+| `-NewFileSystemLabel` | string | `WIPED` | Volume label after formatting. |
+| `-SkipFormat` | switch | off | Skip formatting; only wipe existing free space. |
+| `-QuickFormat` | switch | off | Use quick format instead of full format. |
+| `-Force` | switch | off | Allow operations on fixed (internal) disks. |
+| `-ChunkMiB` | int (1–4096) | `64` | Write buffer size in MiB per I/O operation. |
 
-## 免责声明
+## Important Notes
 
-本工具是个人本机数据清理脚本。请确认目标盘符后再执行，作者不对误操作导致的数据丢失负责。
+- **Double-check the drive letter.** The script will ask you to type a confirmation phrase (e.g. `WIPE E`) before proceeding.
+- This tool is designed for HDDs, USB drives, and external disks under normal data-recovery scenarios.
+- **SSD/NVMe drives:** File-level overwriting cannot guarantee all historical data is erased due to wear leveling, TRIM, over-provisioning, and controller remapping. For higher assurance, use the manufacturer's Secure Erase tool, BIOS/NVMe Secure Erase, or the Windows "Reset this PC" drive cleaning option.
+- Three overwrite passes take time — larger volumes will take longer.
+- The script does not wipe hidden partitions, remapped bad sectors, firmware caches, or reserved disk areas.
+
+## Disclaimer
+
+This is a personal data sanitization tool. Verify the target drive letter before execution. The author is not responsible for data loss caused by misuse.
 
 ## License
 

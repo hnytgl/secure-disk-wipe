@@ -1,0 +1,9 @@
+# PowerShell scripts: require CRLF line endings, binary-safe for BOM
+*.ps1 text eol=crlf
+
+# Markdown: text with LF
+*.md text eol=lf
+
+# Binary files should not be modified
+*.png binary
+*.jpg binary

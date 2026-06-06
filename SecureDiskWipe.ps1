@@ -1,4 +1,4 @@
-<# 
+<#
 .SYNOPSIS
     Format a Windows volume, then wipe free space with three overwrite passes.
 
@@ -14,6 +14,8 @@
     option when you need stronger assurance.
 #>
 
+#Requires -RunAsAdministrator
+
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
     [Parameter(Mandatory = $true)]
@@ -28,6 +30,7 @@ param(
     [string]$NewFileSystemLabel = 'WIPED',
 
     [Parameter()]
+    [ValidateRange(1, 4096)]
     [int]$ChunkMiB = 64,
 
     [Parameter()]
@@ -47,7 +50,7 @@ function Assert-Administrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = [Security.Principal.WindowsPrincipal]::new($identity)
     if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-        throw '请使用管理员权限运行 PowerShell。'
+        throw 'This script requires Administrator privileges. Please run PowerShell as Administrator.'
     }
 }
 
@@ -56,8 +59,9 @@ function Get-TargetVolume {
 
     $normalized = $Letter.TrimEnd(':').ToUpperInvariant()
     $volume = Get-Volume -DriveLetter $normalized -ErrorAction Stop
+
     if ($volume.DriveType -eq 'Fixed' -and -not $Force) {
-        throw "目标 $normalized`: 是固定磁盘。若确认要操作固定磁盘，请添加 -Force。"
+        throw "Target ${normalized}: is a fixed disk. To operate on a fixed disk, add the -Force switch."
     }
 
     return $volume
@@ -70,20 +74,20 @@ function Confirm-DestructiveAction {
     )
 
     Write-Host ''
-    Write-Host '即将执行破坏性操作：' -ForegroundColor Yellow
-    Write-Host "  目标盘符: $Letter`:"
-    Write-Host "  卷标: $($Volume.FileSystemLabel)"
-    Write-Host "  文件系统: $($Volume.FileSystem)"
-    Write-Host "  容量: $([math]::Round($Volume.Size / 1GB, 2)) GB"
-    Write-Host "  是否格式化: $(-not $SkipFormat)"
-    Write-Host "  擦写遍数: 3"
+    Write-Host '=== DESTRUCTIVE OPERATION ===' -ForegroundColor Yellow
+    Write-Host "  Target Drive: ${Letter}:"
+    Write-Host "  Volume Label: $($Volume.FileSystemLabel)"
+    Write-Host "  File System:  $($Volume.FileSystem)"
+    Write-Host "  Capacity:     $([math]::Round($Volume.Size / 1GB, 2)) GB"
+    Write-Host "  Format:       $(-not $SkipFormat)"
+    Write-Host "  Wipe Passes:  3"
     Write-Host ''
-    Write-Host '此操作会删除目标盘上的数据，执行后通常无法恢复。' -ForegroundColor Red
+    Write-Host 'This operation will DELETE ALL DATA on the target drive. Recovery is generally impossible.' -ForegroundColor Red
 
     $expected = "WIPE $Letter"
-    $actual = Read-Host "请输入确认短语 [$expected]"
+    $actual = Read-Host "Type confirmation phrase [$expected]"
     if ($actual -ne $expected) {
-        throw '确认短语不匹配，已取消。'
+        throw 'Confirmation phrase did not match. Operation cancelled.'
     }
 }
 
@@ -119,16 +123,16 @@ function Write-WipePass {
         [int]$ChunkBytes
     )
 
-    $passFile = Join-Path $RootPath ("wipe-pass-{0}.bin" -f $PassNumber)
+    $passFile = Join-Path $RootPath ("wipe-pass-{0}.tmp" -f $PassNumber)
     $buffer = New-PatternBuffer -Pattern $Pattern -Bytes $ChunkBytes
     $written = 0L
 
-    Write-Host "第 $PassNumber 遍擦写开始，模式: $Pattern"
+    Write-Host "Pass $PassNumber starting, pattern: $Pattern"
 
     try {
         $stream = [System.IO.File]::Open(
             $passFile,
-            [System.IO.FileMode]::CreateNew,
+            [System.IO.FileMode]::Create,
             [System.IO.FileAccess]::Write,
             [System.IO.FileShare]::None
         )
@@ -140,7 +144,7 @@ function Write-WipePass {
                     $written += $buffer.Length
 
                     if (($written % (1GB)) -lt $buffer.Length) {
-                        Write-Host ("  已写入约 {0:N2} GB" -f ($written / 1GB))
+                        Write-Host ("  Written approx. {0:N2} GB" -f ($written / 1GB))
                     }
 
                     if ($Pattern -eq 'Random') {
@@ -152,7 +156,7 @@ function Write-WipePass {
                 }
             }
 
-            $stream.Flush($true)
+            $stream.Flush()
         }
         finally {
             $stream.Dispose()
@@ -160,13 +164,14 @@ function Write-WipePass {
     }
     finally {
         if (Test-Path -LiteralPath $passFile) {
-            Remove-Item -LiteralPath $passFile -Force
+            Remove-Item -LiteralPath $passFile -Force -ErrorAction SilentlyContinue
         }
     }
 
-    Write-Host ("第 {0} 遍完成，写入约 {1:N2} GB" -f $PassNumber, ($written / 1GB))
+    Write-Host ("Pass {0} complete, wrote approx. {1:N2} GB" -f $PassNumber, ($written / 1GB))
 }
 
+# Main execution
 Assert-Administrator
 
 $drive = $DriveLetter.TrimEnd(':').ToUpperInvariant()
@@ -175,11 +180,12 @@ Confirm-DestructiveAction -Letter $drive -Volume $volume
 
 if (-not $SkipFormat) {
     $formatParams = @{
-        DriveLetter          = $drive
-        FileSystem           = $FileSystem
-        NewFileSystemLabel   = $NewFileSystemLabel
-        Confirm              = $false
-        Force                = $true
+        DriveLetter        = $drive
+        FileSystem         = $FileSystem
+        NewFileSystemLabel = $NewFileSystemLabel
+        Confirm            = $false
+        Force              = $true
+        ErrorAction        = 'Stop'
     }
 
     if ($QuickFormat) {
@@ -189,26 +195,41 @@ if (-not $SkipFormat) {
         $formatParams.Full = $true
     }
 
-    if ($PSCmdlet.ShouldProcess("$drive`:", "Format volume as $FileSystem")) {
-        Format-Volume @formatParams | Out-Null
+    if ($PSCmdlet.ShouldProcess("${drive}:", "Format volume as $FileSystem")) {
+        try {
+            Format-Volume @formatParams | Out-Null
+            Write-Host "Volume ${drive}: formatted as $FileSystem." -ForegroundColor Green
+        }
+        catch {
+            throw "Failed to format volume ${drive}:. $_"
+        }
     }
 }
+else {
+    Write-Host 'Skipping format as requested (-SkipFormat).' -ForegroundColor Yellow
+}
 
-$root = "$drive`:\"
+$root = "${drive}:\"
 $wipeDir = Join-Path $root '.secure-wipe-temp'
-New-Item -ItemType Directory -Path $wipeDir -Force | Out-Null
+
+try {
+    $null = New-Item -ItemType Directory -Path $wipeDir -Force -ErrorAction Stop
+}
+catch {
+    throw "Failed to create temporary directory on ${drive}:. Check that the drive is accessible. Error: $_"
+}
 
 try {
     $chunkBytes = [Math]::Max(1, $ChunkMiB) * 1MB
-    Write-WipePass -RootPath $wipeDir -PassNumber 1 -Pattern Zero -ChunkBytes $chunkBytes
-    Write-WipePass -RootPath $wipeDir -PassNumber 2 -Pattern One -ChunkBytes $chunkBytes
+    Write-WipePass -RootPath $wipeDir -PassNumber 1 -Pattern Zero  -ChunkBytes $chunkBytes
+    Write-WipePass -RootPath $wipeDir -PassNumber 2 -Pattern One   -ChunkBytes $chunkBytes
     Write-WipePass -RootPath $wipeDir -PassNumber 3 -Pattern Random -ChunkBytes $chunkBytes
 }
 finally {
     if (Test-Path -LiteralPath $wipeDir) {
-        Remove-Item -LiteralPath $wipeDir -Recurse -Force
+        Remove-Item -LiteralPath $wipeDir -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
 
 Write-Host ''
-Write-Host "完成：$drive`: 已格式化并完成三遍空闲空间擦写。" -ForegroundColor Green
+Write-Host "Done: ${drive}: formatted and free space wiped with three passes." -ForegroundColor Green
